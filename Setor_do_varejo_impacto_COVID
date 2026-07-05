@@ -1,0 +1,128 @@
+library(sidrar)
+library(tidyverse)
+library(forecast)
+library(tseries)
+library(strucchange)
+
+# Importando os dados
+dados_brutos <- get_sidra(x = 8880, variable = 7169, period = "all",
+                          geo = "Brazil", classific = "c11046", category = list(56734))
+
+
+glimpse(dados_brutos)
+
+
+# Arrumando os dados
+pmc <- dados_brutos %>%
+  transmute(mes = lubridate::ym(`Mês (Código)`), indice = Valor) %>%
+  arrange(mes)
+
+# colocando os dados em formato de série
+ts_pmc <- ts(pmc$indice,
+             start = c(lubridate::year(min(pmc$mes)), lubridate::month(min(pmc$mes))),
+             frequency = 12)
+
+ts_pmc
+
+# Análise exploratória
+autoplot(ts_pmc) +
+  geom_vline(xintercept = 2020, linetype = "dashed", color = "red") +
+  labs(title = "Índice de volume de vendas no comércio varejista (2022 = 100)",
+       x = "Ano", y = "Número-índice") +
+  theme_minimal()
+
+stl_decomp <- stl(ts_pmc, s.window = "periodic")
+autoplot(stl_decomp) +
+  labs(title = "Decomposição STL do índice de volume de vendas") +
+  theme_minimal()
+
+ggAcf(ts_pmc, lag.max = 48) + labs(title = "ACF - série completa") + theme_minimal()
+ggPacf(ts_pmc, lag.max = 48) + labs(title = "PACF - série completa") + theme_minimal()
+
+# Teste de quebra estrutural 
+tempo <- 1:length(ts_pmc)
+qlr <- Fstats(as.numeric(ts_pmc) ~ tempo)
+
+plot(qlr)
+
+sctest(qlr, type = "supF")
+
+ponto_covid <- which(time(ts_pmc) == 2020)[1]
+
+sctest(qlr, type = "supF", point = ponto_covid)
+
+bp <- breakpoints(as.numeric(ts_pmc) ~ tempo)
+summary(bp)
+plot(bp)
+
+# Dividindo pré/pós-COVID
+pre_covid <- window(ts_pmc, end = c(2019, 12))
+pos_covid <- window(ts_pmc, start = c(2020, 1))
+
+autoplot(pre_covid) + labs(title = "Índice - período pré-COVID", x = "Ano", y = "Número-índice") + theme_minimal()
+autoplot(pos_covid) + labs(title = "Índice - período pós-COVID", x = "Ano", y = "Número-índice") + theme_minimal()
+
+sd(pre_covid)
+sd(pos_covid)
+
+var.test(as.numeric(pre_covid), as.numeric(pos_covid))
+
+# ACF/PACF e estacionariedade por período
+ggAcf(pre_covid, lag.max = 36) + labs(title = "ACF - pré-COVID") + theme_minimal()
+ggPacf(pre_covid, lag.max = 36) + labs(title = "PACF - pré-COVID") + theme_minimal()
+
+ggAcf(pos_covid, lag.max = 36) + labs(title = "ACF - pós-COVID") + theme_minimal()
+ggPacf(pos_covid, lag.max = 36) + labs(title = "PACF - pós-COVID") + theme_minimal()
+
+adf.test(pre_covid)
+kpss.test(pre_covid)
+ndiffs(pre_covid)
+nsdiffs(pre_covid)
+
+adf.test(pos_covid)
+kpss.test(pos_covid)
+ndiffs(pos_covid)
+nsdiffs(pos_covid)
+
+# Ajuste dos modelos SARIMA por período
+modelo_pre <- auto.arima(pre_covid, stepwise = FALSE, approximation = FALSE)
+modelo_pos <- auto.arima(pos_covid, stepwise = FALSE, approximation = FALSE)
+
+summary(modelo_pre)
+summary(modelo_pos)
+
+comparacao_periodos <- tibble(
+  periodo = c("Pré-COVID", "Pós-COVID"),
+  especificacao = c(
+    paste0("(", paste(modelo_pre$arma[c(1,6,2)], collapse = ","), ")(",
+           paste(modelo_pre$arma[c(3,7,4)], collapse = ","), ")[12]"),
+    paste0("(", paste(modelo_pos$arma[c(1,6,2)], collapse = ","), ")(",
+           paste(modelo_pos$arma[c(3,7,4)], collapse = ","), ")[12]")
+  ),
+  AIC = c(AIC(modelo_pre), AIC(modelo_pos)),
+  BIC = c(BIC(modelo_pre), BIC(modelo_pos)),
+  RMSE_treino = c(accuracy(modelo_pre)[1, "RMSE"], accuracy(modelo_pos)[1, "RMSE"])
+)
+
+comparacao_periodos
+
+
+# Diagnóstico de resíduos 
+checkresiduals(modelo_pre)
+checkresiduals(modelo_pos)
+
+Box.test(residuals(modelo_pre), lag = 24, type = "Ljung-Box", fitdf = length(modelo_pre$coef))
+Box.test(residuals(modelo_pos), lag = 24, type = "Ljung-Box", fitdf = length(modelo_pos$coef))
+
+# O teste decisivo: o modelo pré-COVID ainda funciona depois?
+previsao_pre_no_pos <- forecast(modelo_pre, h = length(pos_covid))
+
+autoplot(previsao_pre_no_pos) +
+  autolayer(pos_covid, series = "Observado (pós-COVID)") +
+  labs(title = "Extrapolação do modelo pré-COVID para o período pós-COVID",
+       x = "Ano", y = "Número-índice") +
+  theme_minimal()
+
+acuracia_extrapolacao <- accuracy(previsao_pre_no_pos, pos_covid)
+acuracia_extrapolacao
+
